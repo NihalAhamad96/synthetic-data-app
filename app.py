@@ -59,7 +59,7 @@ class Generator(nn.Module):
                 nn.ReLU(True),
                 nn.Linear(128, output_dim),
             )
-    
+    # hi 
     def forward(self, x):
         return self.main(x)
 
