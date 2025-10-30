@@ -1,73 +1,39 @@
 import streamlit as st
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-import torchvision
-from torchvision import transforms, datasets
-import io
-import time
-from sklearn.datasets import make_classification, make_regression
-from sklearn.preprocessing import StandardScaler
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import os
+from torchvision import datasets, transforms
+import numpy as np
+import matplotlib.pyplot as plt
 
-def setup_environment():
-    """Setup and configuration"""
-    torch.manual_seed(42)
-    np.random.seed(42)
-    plt.style.use('default')
-    print("✅ Environment setup complete")
-    print(f"✅ PyTorch version: {torch.__version__}")
-    print(f"✅ Streamlit version: {st.__version__}")
-
-# -----------------------------
-# GAN Model Definitions
-# -----------------------------
+# ---------------------------
+# Generator Network
+# ---------------------------
 class Generator(nn.Module):
-    def __init__(self, latent_dim, output_dim, data_type):
+    def __init__(self, latent_dim, output_dim):
         super(Generator, self).__init__()
-        self.data_type = data_type
+        self.main = nn.Sequential(
+            nn.Linear(latent_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 256),
+            nn.ReLU(),
+            nn.Linear(256, output_dim),
+            nn.Tanh()
+        )
 
-        if data_type == "MNIST Images":
-            self.main = nn.Sequential(
-                nn.Linear(latent_dim, 128),
-                nn.ReLU(True),
-                nn.Linear(128, 256),
-                nn.BatchNorm1d(256),
-                nn.ReLU(True),
-                nn.Linear(256, 512),
-                nn.BatchNorm1d(512),
-                nn.ReLU(True),
-                nn.Linear(512, 784),
-                nn.Tanh()
-            )
-        else:  # Tabular data
-            self.main = nn.Sequential(
-                nn.Linear(latent_dim, 128),
-                nn.ReLU(True),
-                nn.Linear(128, 256),
-                nn.ReLU(True),
-                nn.Linear(256, 128),
-                nn.ReLU(True),
-                nn.Linear(128, output_dim),
-            )
-
-    def forward(self, x):
-        return self.main(x)
+    def forward(self, z):
+        return self.main(z)
 
 
+# ---------------------------
+# Discriminator Network
+# ---------------------------
 class Discriminator(nn.Module):
     def __init__(self, input_dim):
         super(Discriminator, self).__init__()
         self.main = nn.Sequential(
-            nn.Linear(input_dim, 512),
-            nn.LeakyReLU(0.2),
-            nn.Linear(512, 256),
+            nn.Linear(input_dim, 256),
             nn.LeakyReLU(0.2),
             nn.Linear(256, 128),
             nn.LeakyReLU(0.2),
@@ -76,68 +42,26 @@ class Discriminator(nn.Module):
         )
 
     def forward(self, x):
+        # ✅ Flatten automatically if input is image (batch, 1, 28, 28)
+        if len(x.shape) > 2:
+            x = x.view(x.size(0), -1)
         return self.main(x)
 
 
-# -----------------------------
-# Data Preparation
-# -----------------------------
-def prepare_data(data_type, batch_size):
-    print(f"📊 Preparing {data_type} data...")
-
-    if data_type == "MNIST Images":
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,))
-        ])
-        train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        return train_loader, 784, (1, 28, 28)
-
-    elif data_type == "Simple Tabular":
-        data = np.random.multivariate_normal([0, 0], [[1, 0.8], [0.8, 1]], 1000)
-        dataset = TensorDataset(torch.FloatTensor(data))
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-        return loader, 2, None
-
-    elif data_type == "Classification Dataset":
-        X, y = make_classification(n_samples=1000, n_features=5, n_informative=3,
-                                  n_redundant=1, n_clusters_per_class=1, random_state=42)
-        data = np.column_stack([X, y])
-        dataset = TensorDataset(torch.FloatTensor(data))
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-        return loader, 6, None
-
-    else:  # Regression Dataset
-        X, y = make_regression(n_samples=1000, n_features=3, noise=0.1, random_state=42)
-        data = np.column_stack([X, y.reshape(-1, 1)])
-        dataset = TensorDataset(torch.FloatTensor(data))
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-        return loader, 4, None
-
-
-# -----------------------------
-# GAN Training
-# -----------------------------
+# ---------------------------
+# GAN Training Loop
+# ---------------------------
 def train_gan(data_loader, latent_dim, output_dim, data_type, epochs, lr):
-    print("🚀 Starting GAN training...")
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"🖥️  Using device: {device}")
 
-    generator = Generator(latent_dim, output_dim, data_type).to(device)
+    generator = Generator(latent_dim, output_dim).to(device)
     discriminator = Discriminator(output_dim).to(device)
 
+    criterion = nn.BCELoss()
     optimizer_G = optim.Adam(generator.parameters(), lr=lr)
     optimizer_D = optim.Adam(discriminator.parameters(), lr=lr)
-    criterion = nn.BCELoss()
 
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    loss_plot = st.empty()
-
-    g_losses = []
-    d_losses = []
+    g_losses, d_losses = [], []
 
     for epoch in range(epochs):
         for i, batch in enumerate(data_loader):
@@ -150,18 +74,19 @@ def train_gan(data_loader, latent_dim, output_dim, data_type, epochs, lr):
             batch_size = real_data.size(0)
             real_data = real_data.to(device)
 
+            # -----------------
             # Train Discriminator
+            # -----------------
             optimizer_D.zero_grad()
 
-            # Real data
             real_labels = torch.ones(batch_size, 1).to(device)
+            fake_labels = torch.zeros(batch_size, 1).to(device)
+
             real_output = discriminator(real_data)
             d_loss_real = criterion(real_output, real_labels)
 
-            # Fake data
             z = torch.randn(batch_size, latent_dim).to(device)
             fake_data = generator(z)
-            fake_labels = torch.zeros(batch_size, 1).to(device)
             fake_output = discriminator(fake_data.detach())
             d_loss_fake = criterion(fake_output, fake_labels)
 
@@ -169,7 +94,9 @@ def train_gan(data_loader, latent_dim, output_dim, data_type, epochs, lr):
             d_loss.backward()
             optimizer_D.step()
 
+            # -----------------
             # Train Generator
+            # -----------------
             optimizer_G.zero_grad()
             z = torch.randn(batch_size, latent_dim).to(device)
             fake_data = generator(z)
@@ -181,192 +108,98 @@ def train_gan(data_loader, latent_dim, output_dim, data_type, epochs, lr):
         g_losses.append(g_loss.item())
         d_losses.append(d_loss.item())
 
-        progress = (epoch + 1) / epochs
-        progress_bar.progress(progress)
-        status_text.text(f'Epoch [{epoch+1}/{epochs}], d_loss: {d_loss.item():.4f}, g_loss: {g_loss.item():.4f}')
+        print(f"Epoch [{epoch+1}/{epochs}] | D Loss: {d_loss.item():.4f} | G Loss: {g_loss.item():.4f}")
 
-        if epoch % 10 == 0:
-            fig, ax = plt.subplots(figsize=(10, 4))
-            ax.plot(g_losses, label='Generator Loss')
-            ax.plot(d_losses, label='Discriminator Loss')
-            ax.set_xlabel('Epoch')
-            ax.set_ylabel('Loss')
-            ax.legend()
-            ax.set_title('Training Losses')
-            loss_plot.pyplot(fig)
-            plt.close()
-
-    print("✅ Training completed!")
     return generator, discriminator, g_losses, d_losses
 
 
-# -----------------------------
-# Synthetic Sample Generation
-# -----------------------------
-def generate_samples(generator, num_samples, latent_dim, data_type):
-    print(f"🎨 Generating {num_samples} synthetic samples...")
+# ---------------------------
+# Synthetic Dataset Creation
+# ---------------------------
+def get_data_loader(data_type, batch_size=64):
+    if data_type == "MNIST":
+        transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize([0.5], [0.5])])
+        dataset = datasets.MNIST(root="./data", train=True, transform=transform, download=True)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        output_dim = 28 * 28
 
-    device = next(generator.parameters()).device
-    z = torch.randn(num_samples, latent_dim).to(device)
-    with torch.no_grad():
-        samples = generator(z).cpu().numpy()
+    elif data_type == "Gaussian":
+        data = np.random.randn(10000, 2).astype(np.float32)
+        dataset = TensorDataset(torch.tensor(data))
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        output_dim = 2
 
-    if data_type == "MNIST Images":
-        samples = samples.reshape(-1, 28, 28)
-        samples = (samples + 1) / 2
-    return samples
+    elif data_type == "Sine Wave":
+        x = np.linspace(0, 2 * np.pi, 10000)
+        y = np.sin(x) + 0.1 * np.random.randn(10000)
+        data = np.stack((x, y), axis=1).astype(np.float32)
+        dataset = TensorDataset(torch.tensor(data))
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        output_dim = 2
+
+    else:
+        raise ValueError("Unknown data type")
+
+    return loader, output_dim
 
 
-def plot_comparison(real_data, synthetic_data, data_type):
-    if data_type == "MNIST Images":
-        fig, axes = plt.subplots(2, 10, figsize=(15, 3))
-        fig.suptitle('Real vs Synthetic MNIST Digits')
+# ---------------------------
+# Visualization Functions
+# ---------------------------
+def visualize_results(generator, latent_dim, data_type):
+    generator.eval()
+    z = torch.randn(1000, latent_dim)
+    fake_data = generator(z).detach().cpu().numpy()
 
-        for i in range(10):
-            axes[0, i].imshow(real_data[i], cmap='gray')
-            axes[0, i].axis('off')
-            if i == 0:
-                axes[0, i].set_ylabel('Real', rotation=90, size='large')
-
-        for i in range(10):
-            axes[1, i].imshow(synthetic_data[i], cmap='gray')
-            axes[1, i].axis('off')
-            if i == 0:
-                axes[1, i].set_ylabel('Synthetic', rotation=90, size='large')
-
+    if data_type == "MNIST":
+        fig, axes = plt.subplots(1, 5, figsize=(10, 2))
+        for i in range(5):
+            axes[i].imshow(fake_data[i].reshape(28, 28), cmap="gray")
+            axes[i].axis("off")
         st.pyplot(fig)
 
     else:
-        fig = make_subplots(rows=1, cols=2,
-                           subplot_titles=['Real Data Distribution', 'Synthetic Data Distribution'])
-
-        fig.add_trace(
-            go.Scatter(x=real_data[:, 0], y=real_data[:, 1], mode='markers', name='Real'),
-            row=1, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=synthetic_data[:, 0], y=synthetic_data[:, 1], mode='markers', name='Synthetic'),
-            row=1, col=2
-        )
-        fig.update_layout(height=400, showlegend=True)
-        st.plotly_chart(fig, use_container_width=True)
+        plt.figure(figsize=(4, 4))
+        plt.scatter(fake_data[:, 0], fake_data[:, 1], alpha=0.5)
+        plt.title("Generated Synthetic Data")
+        st.pyplot(plt)
 
 
-def show_statistics(real_data, synthetic_data, data_type):
-    st.subheader("📈 Statistical Comparison")
-
-    if data_type == "MNIST Images":
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Real Data Mean", f"{np.mean(real_data):.4f}")
-            st.metric("Synthetic Data Mean", f"{np.mean(synthetic_data):.4f}")
-        with col2:
-            st.metric("Real Data Std", f"{np.std(real_data):.4f}")
-            st.metric("Synthetic Data Std", f"{np.std(synthetic_data):.4f}")
-        with col3:
-            st.metric("Mean Absolute Difference", f"{np.mean(np.abs(real_data - synthetic_data[:len(real_data)])):.4f}")
-    else:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("**Real Data Statistics**")
-            real_df = pd.DataFrame(real_data[:, :min(5, real_data.shape[1])])
-            st.dataframe(real_df.describe())
-        with col2:
-            st.write("**Synthetic Data Statistics**")
-            syn_df = pd.DataFrame(synthetic_data[:, :min(5, synthetic_data.shape[1])])
-            st.dataframe(syn_df.describe())
-
-
-# -----------------------------
-# Streamlit Main Function
-# -----------------------------
+# ---------------------------
+# Streamlit App
+# ---------------------------
 def main():
-    setup_environment()
-
-    st.set_page_config(
-        page_title="Synthetic Data Generation Playground",
-        page_icon="🎭",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-
     st.title("🎭 Synthetic Data Generation Playground")
-    st.markdown("""
-    This interactive playground demonstrates Generative Adversarial Networks (GANs) for synthetic data generation.
-    Experiment with different architectures and parameters to understand how synthetic data is created!
-    """)
+    st.markdown(
+        "This interactive playground demonstrates Generative Adversarial Networks (GANs) for synthetic data generation. "
+        "Experiment with different architectures and parameters to understand how synthetic data is created!"
+    )
 
     st.sidebar.header("⚙️ Configuration")
 
-    data_type = st.sidebar.selectbox(
-        "Select Data Type",
-        ["MNIST Images", "Simple Tabular", "Classification Dataset", "Regression Dataset"]
-    )
+    data_type = st.sidebar.selectbox("Choose dataset type:", ["MNIST", "Gaussian", "Sine Wave"])
+    latent_dim = st.sidebar.slider("Latent dimension (z)", 2, 100, 20)
+    epochs = st.sidebar.slider("Training epochs", 1, 50, 5)
+    lr = st.sidebar.number_input("Learning rate", 0.0001, 0.01, 0.001, step=0.0001)
+    batch_size = st.sidebar.slider("Batch size", 16, 256, 64)
 
-    gan_arch = st.sidebar.selectbox(
-        "GAN Architecture",
-        ["Vanilla GAN", "DCGAN", "Conditional GAN (cGAN)"]
-    )
-
-    st.sidebar.subheader("🎯 Training Parameters")
-    latent_dim = st.sidebar.slider("Latent Dimension", 10, 200, 100, 10)
-    epochs = st.sidebar.slider("Number of Epochs", 10, 500, 100, 10)
-    batch_size = st.sidebar.slider("Batch Size", 16, 256, 64, 16)
-    lr = st.sidebar.slider("Learning Rate", 0.0001, 0.01, 0.002, 0.0001)
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("💻 System Info")
-    st.sidebar.write(f"PyTorch: {torch.__version__}")
-    st.sidebar.write(f"Device: {'GPU 🚀' if torch.cuda.is_available() else 'CPU ⚡'}")
-
-    if st.sidebar.button("🚀 Start Training", type="primary"):
-        with st.spinner("Preparing data and training GAN..."):
-            data_loader, output_dim, img_shape = prepare_data(data_type, batch_size)
+    if st.button("🚀 Train GAN"):
+        with st.spinner("Training GAN... Please wait ⏳"):
+            data_loader, output_dim = get_data_loader(data_type, batch_size)
             generator, discriminator, g_losses, d_losses = train_gan(
                 data_loader, latent_dim, output_dim, data_type, epochs, lr
             )
 
-            st.success("🎉 Training completed!")
+        st.success("✅ Training complete!")
+        st.subheader("📉 Loss Curves")
+        plt.figure()
+        plt.plot(g_losses, label="Generator Loss")
+        plt.plot(d_losses, label="Discriminator Loss")
+        plt.legend()
+        st.pyplot(plt)
 
-            real_samples = next(iter(data_loader))[0].numpy()
-            if data_type == "MNIST Images":
-                real_samples = real_samples.reshape(-1, 28, 28)
-                real_samples = (real_samples + 1) / 2
-
-            synthetic_samples = generate_samples(generator, len(real_samples), latent_dim, data_type)
-
-            st.header("📊 Results")
-            plot_comparison(real_samples, synthetic_samples, data_type)
-            show_statistics(real_samples, synthetic_samples, data_type)
-
-            st.header("🎨 Generate More Samples")
-            num_additional_samples = st.slider("Number of additional samples to generate", 10, 1000, 100)
-
-            if st.button("✨ Generate Additional Samples"):
-                additional_samples = generate_samples(generator, num_additional_samples, latent_dim, data_type)
-
-                if data_type == "MNIST Images":
-                    samples_flat = additional_samples.reshape(additional_samples.shape[0], -1)
-                    df = pd.DataFrame(samples_flat)
-                    df.columns = [f'pixel_{i}' for i in range(df.shape[1])]
-                else:
-                    df = pd.DataFrame(additional_samples)
-                    df.columns = [f'feature_{i}' for i in range(df.shape[1])]
-
-                csv = df.to_csv(index=False)
-                st.download_button(
-                    label="📥 Download synthetic data as CSV",
-                    data=csv,
-                    file_name=f"synthetic_data_{data_type.replace(' ', '_').lower()}.csv",
-                    mime="text/csv"
-                )
-
-                st.subheader("Generated Data Sample")
-                st.dataframe(df.head(10))
-                st.success(f"✅ Generated {num_additional_samples} additional samples!")
-
-    else:
-        st.info("👈 Configure your settings in the sidebar and click 'Start Training' to begin!")
+        st.subheader("🎨 Generated Samples")
+        visualize_results(generator, latent_dim, data_type)
 
 
 if __name__ == "__main__":
